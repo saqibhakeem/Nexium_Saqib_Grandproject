@@ -1,0 +1,280 @@
+{
+  "name": "Recipe Generator Workflow",
+  "description": "AI-powered recipe generation workflow for Recipe Generator app",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Recipe Generation Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [100, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "recipe-generate",
+        "responseMode": "responseNode",
+        "responseData": "allEntries"
+      },
+      "webhookId": "recipe-generate-webhook"
+    },
+    {
+      "id": "data-validation",
+      "name": "Validate Input Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [300, 300],
+      "parameters": {
+        "functionCode": "// Validate and prepare input data\nconst body = $input.all()[0].json.body;\n\n// Required fields validation\nif (!body.ingredients || !Array.isArray(body.ingredients) || body.ingredients.length === 0) {\n  throw new Error('Ingredients are required');\n}\n\n// Prepare data for AI processing\nconst processedData = {\n  ingredients: body.ingredients.map(ing => ing.trim()).filter(ing => ing.length > 0),\n  dietary_preferences: body.dietary_preferences || [],\n  cuisine_preference: body.cuisine_preference || '',\n  difficulty_preference: body.difficulty_preference || 'medium',\n  cooking_time: body.cooking_time || '30 minutes',\n  servings: body.servings || 4,\n  user_id: body.user_id || null,\n  timestamp: new Date().toISOString()\n};\n\n// Log for debugging\nconsole.log('Processing recipe request:', processedData);\n\nreturn { json: processedData };"
+      }
+    },
+    {
+      "id": "ai-router",
+      "name": "AI Provider Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $env.PREFERRED_AI_PROVIDER }}",
+              "value2": "openai"
+            }
+          ]
+        },
+        "fallbackOutput": 1
+      }
+    },
+    {
+      "id": "openai-generation",
+      "name": "OpenAI Recipe Generation",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [700, 200],
+      "parameters": {
+        "resource": "text",
+        "operation": "complete",
+        "model": "gpt-4-turbo-preview",
+        "prompt": "=You are a professional chef AI assistant. Generate a detailed, creative recipe using the following:\n\nINGREDIENTS: {{ $json.ingredients.join(', ') }}\nDIETARY RESTRICTIONS: {{ $json.dietary_preferences.join(', ') || 'none' }}\nCUISINE: {{ $json.cuisine_preference || 'any' }}\nDIFFICULTY: {{ $json.difficulty_preference }}\nSERVINGS: {{ $json.servings }}\n\nRespond with valid JSON containing: title, description, ingredients (with measurements), instructions, prep_time, cook_time, difficulty, cuisine, dietary_tags, tips, and nutrition_info.",
+        "maxTokens": 2000,
+        "temperature": 0.8,
+        "responseFormat": "json_object"
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-credentials",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "id": "anthropic-generation",
+      "name": "Anthropic Recipe Generation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [700, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headers": {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01"
+        },
+        "body": {
+          "model": "claude-3-haiku-20240307",
+          "max_tokens": 2000,
+          "temperature": 0.8,
+          "messages": [
+            {
+              "role": "user",
+              "content": "=You are a professional chef AI assistant. Generate a detailed, creative recipe using:\n\nINGREDIENTS: {{ $json.ingredients.join(', ') }}\nDIETARY: {{ $json.dietary_preferences.join(', ') || 'none' }}\nCUISINE: {{ $json.cuisine_preference || 'any' }}\nDIFFICULTY: {{ $json.difficulty_preference }}\nSERVINGS: {{ $json.servings }}\n\nRespond with JSON: {\"title\": \"\", \"description\": \"\", \"ingredients\": [], \"instructions\": [], \"prep_time\": 0, \"cook_time\": 0, \"difficulty\": \"\", \"cuisine\": \"\", \"dietary_tags\": [], \"tips\": [], \"nutrition_info\": {}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropic-credentials",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "id": "recipe-processor",
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 300],
+      "parameters": {
+        "functionCode": "// Process AI response and standardize format\nconst inputData = $input.all()[0].json;\nlet recipe;\n\n// Handle different AI provider responses\nif (inputData.choices) {\n  // OpenAI response format\n  const content = inputData.choices[0].message.content;\n  recipe = JSON.parse(content);\n} else if (inputData.content) {\n  // Anthropic response format\n  const textContent = inputData.content[0].text;\n  const jsonMatch = textContent.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    recipe = JSON.parse(jsonMatch[0]);\n  } else {\n    throw new Error('No JSON found in AI response');\n  }\n} else {\n  throw new Error('Unknown AI response format');\n}\n\n// Validate and normalize recipe\nif (!recipe.title || !recipe.ingredients || !recipe.instructions) {\n  throw new Error('Invalid recipe: missing required fields');\n}\n\n// Ensure required fields\nrecipe.total_time = (recipe.prep_time || 10) + (recipe.cook_time || 15);\nrecipe.generated_by = 'ai';\nrecipe.created_at = new Date().toISOString();\nrecipe.source_ingredients = $('data-validation').all()[0].json.ingredients;\n\n// Add metadata\nrecipe.generation_metadata = {\n  ai_provider: inputData.choices ? 'openai' : 'anthropic',\n  model_used: inputData.model || 'unknown',\n  generated_at: new Date().toISOString(),\n  processing_time: Date.now() - new Date($('data-validation').all()[0].json.timestamp).getTime()\n};\n\nconsole.log('Processed recipe:', recipe.title);\n\nreturn { json: recipe };"
+      }
+    },
+    {
+      "id": "database-save",
+      "name": "Save to Database",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1100, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.APP_BASE_URL }}/api/recipes/save-generated",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {{ $env.INTERNAL_API_KEY }}"
+        },
+        "body": "={{ $json }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "response-formatter",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1300, 300],
+      "parameters": {
+        "functionCode": "// Format final response for the frontend\nconst recipe = $input.all()[0].json;\n\n// Clean up response for frontend\nconst response = {\n  success: true,\n  recipe: {\n    _id: recipe.recipe_id || recipe._id,\n    title: recipe.title,\n    description: recipe.description,\n    ingredients: recipe.ingredients,\n    instructions: recipe.instructions,\n    prep_time: recipe.prep_time,\n    cook_time: recipe.cook_time,\n    total_time: recipe.total_time,\n    difficulty: recipe.difficulty,\n    cuisine: recipe.cuisine,\n    dietary_tags: recipe.dietary_tags || [],\n    tips: recipe.tips || [],\n    nutrition_info: recipe.nutrition_info || {},\n    generated_by: 'ai',\n    created_at: recipe.created_at,\n    source_ingredients: recipe.source_ingredients\n  },\n  generation_info: {\n    ai_provider: recipe.generation_metadata?.ai_provider || 'unknown',\n    processing_time_ms: recipe.generation_metadata?.processing_time || 0,\n    generated_at: recipe.generation_metadata?.generated_at || new Date().toISOString()\n  }\n};\n\nconsole.log('Sending response for:', response.recipe.title);\n\nreturn { json: response };"
+      }
+    },
+    {
+      "id": "webhook-response",
+      "name": "Send Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1500, 300],
+      "parameters": {
+        "responseBody": "={{ $json }}",
+        "responseContentType": "application/json",
+        "responseStatusCode": 200
+      }
+    },
+    {
+      "id": "error-handler",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1000, 500],
+      "parameters": {
+        "responseBody": "{\n  \"success\": false,\n  \"error\": \"{{ $json.error || 'Recipe generation failed' }}\",\n  \"message\": \"Unable to generate recipe at this time. Please try again.\"\n}",
+        "responseContentType": "application/json",
+        "responseStatusCode": 500
+      }
+    }
+  ],
+  "connections": {
+    "webhook-trigger": {
+      "main": [
+        [
+          {
+            "node": "data-validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "data-validation": {
+      "main": [
+        [
+          {
+            "node": "ai-router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ai-router": {
+      "main": [
+        [
+          {
+            "node": "openai-generation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "anthropic-generation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "openai-generation": {
+      "main": [
+        [
+          {
+            "node": "recipe-processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "anthropic-generation": {
+      "main": [
+        [
+          {
+            "node": "recipe-processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "recipe-processor": {
+      "main": [
+        [
+          {
+            "node": "database-save",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "database-save": {
+      "main": [
+        [
+          {
+            "node": "response-formatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "response-formatter": {
+      "main": [
+        [
+          {
+            "node": "webhook-response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "errorWorkflow": {
+      "errorHandling": "continueRegularOutput",
+      "errorNodeName": "error-handler"
+    },
+    "timeout": 300,
+    "timezone": "UTC"
+  },
+  "staticData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {},
+  "versionId": "1.0.0"
+}
